@@ -9,16 +9,16 @@ pub async fn run_worker(pool: PgPool) -> eyre::Result<()> {
 
     loop {
         // Select 50 unprocessed records
-        //let rows = sqlx::query!(
-        //    "SELECT id, chain_id, tx_hash, address, data, topics FROM transaction_logs WHERE processed = false LIMIT 50"
-        //)
-        //.fetch_all(&pool).await?;
+        let rows = sqlx::query!(
+            "SELECT id, chain_id, tx_hash, address, data, topics FROM transaction_logs WHERE processed = false LIMIT 50"
+        )
+        .fetch_all(&pool).await?;
 
-        //for row in rows {
-        //    // In a real application, here goes the logic for row -> Log conversion
-        //    // After successful transformation, save to ledger_entries
-        //    storage::mark_as_processed(&pool, row.id).await?;
-        //}
+        for row in rows {
+            // In a real application, here goes the logic for row -> Log conversion
+            // After successful transformation, save to ledger_entries
+            storage::mark_as_processed(&pool, row.id).await?;
+        }
         
         sleep(Duration::from_secs(2)).await;
     }
