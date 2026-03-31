@@ -1,85 +1,52 @@
 use alloy::providers::Provider;
-use alloy::rpc::types::Filter;
-use sqlx::PgPool;
+use alloy::rpc::types::{BlockTransactionsKind, Filter};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 use crate::storage;
+use alloy::primitives::{Address, B256};
+use cae_types::TransactionIntent;
 
-/// The Fetcher is responsible for pulling raw logs from a specific blockchain 
-/// and persisting them into the transaction_logs table.
-pub async fn run_fetcher<P>(
-    provider: Arc<P>,
-    pool: PgPool,
-    chain_id: u64,
-) -> eyre::Result<()> 
-where 
-    P: Provider + 'static 
-{
-    tracing::info!(target: "cae_fetcher", "Starting fetcher for Chain ID: {}", chain_id);
+pub struct Backfiller<P> { provider: Arc<P>, pool: sqlx::PgPool }
 
-    // 1. Determine polling interval based on the chain
-    let poll_interval = match chain_id {
-        1 => Duration::from_secs(12),      // Ethereum Mainnet
-        42161 | 8453 => Duration::from_secs(2), // Arbitrum/Base (Fast blocks)
-        _ => Duration::from_secs(5),       // Default
-    };
-
-    // 2. Initialize the starting block
-    // In a real app, you would fetch the 'last_synced_block' from the DB
-    let mut last_processed_block = provider.get_block_number().await?;
-
-    loop {
-        // Get the current tip of the chain
-        let current_block = match provider.get_block_number().await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(target: "cae_fetcher", "Chain {}: Failed to get latest block: {:?}", chain_id, e);
-                sleep(Duration::from_secs(10)).await;
-                continue;
-            }
-        };
-
-        // If we are caught up, wait for new blocks
-        if current_block <= last_processed_block {
-            sleep(poll_interval).await;
-            continue;
+impl<P: Provider + 'static> Backfiller<P> {
+    pub fn new(provider: Arc<P>, pool: sqlx::PgPool) -> Self { Self { provider, pool } }
+    pub async fn scan_history(&self, chain_id: u64, watchlist: &[Address], start_block: u64) -> eyre::Result<()> {
+        let current_block = self.provider.get_block_number().await?;
+        let mut from = start_block;
+        while from < current_block {
+            let to = std::cmp::min(from + 2000, current_block);
+            let filter = Filter::new().from_block(from).to_block(to).address(watchlist.to_vec());
+            let logs = self.provider.get_logs(&filter).await?;
+            for log in logs { storage::save_raw_log(&self.pool, chain_id, &log).await?; }
+            from = to + 1;
         }
-
-        // 3. Define the fetch range
-        // We limit the range to 1000 blocks per request to avoid RPC timeouts
-        let target_block = std::cmp::min(last_processed_block + 1000, current_block);
-        
-        tracing::debug!(
-            target: "cae_fetcher", 
-            "Chain {}: Syncing range {} -> {}", 
-            chain_id, last_processed_block + 1, target_block
-        );
-
-        // 4. Build the filter
-        let filter = Filter::new()
-            .from_block(last_processed_block + 1)
-            .to_block(target_block);
-
-        // 5. Fetch logs via RPC
-        match provider.get_logs(&filter).await {
-            Ok(logs) => {
-                for log in logs {
-                    // Persist raw log to the Ingestion Layer
-                    if let Err(e) = storage::save_raw_log(&pool, chain_id, &log).await {
-                        tracing::error!(target: "cae_fetcher", "Chain {}: DB Error: {:?}", chain_id, e);
-                    }
-                }
-                
-                // Update progress
-                last_processed_block = target_block;
-            }
-            Err(e) => {
-                tracing::error!(target: "cae_fetcher", "Chain {}: RPC error during get_logs: {:?}", chain_id, e);
-                sleep(Duration::from_secs(5)).await;
-            }
-        }
-
-        // Brief throttle to avoid hitting RPC rate limits
-        sleep(Duration::from_millis(100)).await;
+        Ok(())
     }
+}
+
+pub async fn run_realtime_listener<P: Provider + 'static>(
+    provider: Arc<P>,
+    pool: sqlx::PgPool,
+    chain_id: u64,
+    watchlist: Vec<Address>,
+) -> eyre::Result<()> {
+    let mut block_stream = provider.subscribe_blocks().await?.into_stream();
+    while let Some(block_header) = block_stream.next().await {
+        let block_number = block_header.number.unwrap();
+        let block = provider.get_block_by_number(block_number.into(), BlockTransactionsKind::Full).await?.unwrap();
+
+        for tx in block.transactions.as_transactions().unwrap() {
+            let from_watch = watchlist.contains(&tx.from);
+            let to_watch = tx.to.map_or(false, |to| watchlist.contains(&to));
+            if (from_watch || to_watch) && tx.value > alloy::primitives::U256::ZERO {
+                let intent = if from_watch && to_watch { TransactionIntent::InternalTransfer }
+                             else if to_watch { TransactionIntent::Inbound }
+                             else { TransactionIntent::Outbound };
+                storage::save_native_transfer(&pool, chain_id, tx.hash, tx.value, intent, "Native ETH transfer".into()).await?;
+            }
+        }
+        let filter = Filter::new().from_block(block_number).to_block(block_number);
+        let logs = provider.get_logs(&filter).await?;
+        for log in logs { storage::save_raw_log(&pool, chain_id, &log).await?; }
+    }
+    Ok(())
 }

@@ -1,102 +1,39 @@
-use sqlx::PgPool;
-use tokio::time::{sleep, Duration};
-use alloy::rpc::types::Log;
-use alloy::primitives::{Address, B256, Bytes, LogData};
-use crate::ingestion::transformers::UniswapTransformer;
+use alloy::providers::Provider;
+use sqlx::{PgPool, Row};
+use std::sync::Arc;
 use crate::storage;
-use cae_types::Transformer;
+use crate::ingestion::transformers::{erc20::Erc20Transformer, lp::LpTransformer};
+use alloy::rpc::types::{Log, LogData};
+use alloy::primitives::{Address, B256, Bytes};
 
-/// The main worker loop that processes raw blockchain logs from the database
-pub async fn run_worker(pool: PgPool) -> eyre::Result<()> {
-    // Register all active protocol transformers
-    // You can easily add more transformers here (e.g., Aave, Curve, Lido)
-    let transformers: Vec<Box<dyn Transformer>> = vec![
-        Box::new(UniswapTransformer),
-    ];
-
-    tracing::info!(target: "cae_worker", "Worker started. Polling for unprocessed logs...");
-
+pub async fn run_worker<P: Provider + 'static>(pool: PgPool, provider: Arc<P>, chain_id: u64) -> eyre::Result<()> {
     loop {
-        // 1. Fetch a batch of unprocessed logs from the Ingestion Layer
-        // We use a limit to prevent memory spikes and ensure smooth processing
-        let rows = sqlx::query_as::<_, (i64, i32, Vec<u8>, Vec<u8>, Vec<u8>, sqlx::types::JsonValue)>(
-            r#"
-            SELECT id, chain_id, tx_hash, address, data, topics 
-            FROM transaction_logs 
-            WHERE processed = false 
-            ORDER BY created_at ASC
-            LIMIT 50
-            "#
-        )
-        .fetch_all(&pool).await?;
+        let watchlist = storage::get_watchlist(&pool).await?;
+        let rows = storage::get_unprocessed_logs_by_chain(&pool, chain_id).await?;
 
-        if rows.is_empty() {
-            // No work to do, back off for a few seconds
-            sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        let rows_len = rows.len();
-        for (id, chain_id, tx_hash_bytes, address_bytes, data_bytes, topics_json_value) in rows {
-            // 2. Hydrate database bytes back into Alloy types
-            // We convert database binary data (BYTEA) into EVM primitives
-            let contract_address = Address::from_slice(&address_bytes);
-            let tx_hash = B256::from_slice(&tx_hash_bytes);
+        for row in rows {
+            let log_id: i32 = row.get("id");
+            let topics_raw: Vec<Vec<u8>> = row.get("topics");
+            let topics: Vec<B256> = topics_raw.into_iter().map(|t| B256::from_slice(&t)).collect();
             
-            // Reconstruct topics from JSONB column
-            let topics_json: Vec<String> = serde_json::from_value(topics_json_value)?;
-            let topics: Vec<B256> = topics_json
-                .into_iter()
-                .map(|s| s.parse().unwrap_or_default())
-                .collect();
-
-            // Construct the standardized Alloy Log object for transformers
-            let alloy_log = Log {
-                inner: alloy::primitives::Log {
-                    address: contract_address,
-                    data: LogData::new_unchecked(topics, Bytes::from(data_bytes)),
-                },
-                block_hash: None,
-                block_number: None,
-                block_timestamp: None,
-                transaction_hash: Some(tx_hash),
-                transaction_index: None,
-                log_index: None,
-                removed: false,
+            let log = Log {
+                address: Address::from_slice(row.get("address")),
+                data: LogData::new_unchecked(topics, Bytes::from(row.get::<Vec<u8>, _>("data"))),
+                block_hash: None, block_number: None, transaction_index: None, removed: false,
+                transaction_hash: Some(row.get::<String, _>("tx_hash").parse().unwrap()),
+                log_index: Some(row.get::<i32, _>("log_index") as u64),
             };
 
-            // 3. Run the hydrated log through the transformer pipeline
-            let mut matched = false;
-            for tf in &transformers {
-                if let Some(entry) = tf.transform(&alloy_log, chain_id as u64) {
-                    tracing::debug!(
-                        target: "cae_worker", 
-                        "Transformer [{}] identified event [{}] in tx {:?}", 
-                        tf.name(), entry.event_name, tx_hash
-                    );
-                    
-                    // Persist the identified financial entry to the Ledger Layer
-                    if let Err(e) = storage::save_audit_entry(&pool, entry).await {
-                        tracing::error!("Failed to save audit entry: {:?}", e);
-                        // We do not mark as processed here so we can retry on next loop
-                        continue;
-                    }
-                    matched = true;
-                }
-            }
+            let entry = LpTransformer::transform(&log, chain_id, &watchlist)
+                .or_else(|| Erc20Transformer::transform(&log, chain_id, &watchlist));
 
-            if !matched {
-                tracing::trace!(target: "cae_worker", "No transformer matched log ID: {}", id);
+            if let Some(mut e) = entry {
+                let (sym, _) = storage::get_or_discover_token(&pool, provider.clone(), chain_id, e.token_address).await?;
+                e.description = format!("{} [{}]", e.description, sym);
+                storage::save_audit_entry(&pool, e).await?;
             }
-
-            // 4. Update the processing state
-            // Even if no transformer matched, we mark it as processed because 
-            // it has been inspected by the current engine logic.
-            if let Err(e) = storage::mark_as_processed(&pool, id).await {
-                tracing::error!("Failed to mark log {} as processed: {:?}", id, e);
-            }
+            storage::mark_processed(&pool, log_id).await?;
         }
-        
-        tracing::info!(target: "cae_worker", "Processed batch of {} logs", rows_len);
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 }

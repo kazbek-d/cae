@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAE | ChainAudit Engine Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen font-sans">
+
+    <nav class="border-b border-slate-800 p-6 glass sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
+                    <span class="font-bold text-xl">C</span>
+                </div>
+                <h1 class="text-2xl font-bold tracking-tight text-white">ChainAudit <span class="text-blue-500">Engine</span></h1>
+            </div>
+            <div class="flex gap-4">
+                <span id="status" class="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-sm border border-emerald-500/20">
+                    <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span> API Live
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto p-6 space-y-8">
+        
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div class="lg:col-span-2 space-y-6">
+                <h2 class="text-xl font-semibold text-white">Portfolio Distribution</h2>
+                <div class="glass p-6 rounded-2xl h-[400px] flex items-center justify-center">
+                    <canvas id="portfolioChart"></canvas>
+                </div>
+            </div>
+
+            <div class="space-y-6">
+                <h2 class="text-xl font-semibold text-white">Asset Summary</h2>
+                <div id="asset-list" class="space-y-3 overflow-y-auto max-h-[400px] pr-2">
+                    <div class="animate-pulse bg-slate-800 h-20 rounded-xl"></div>
+                    <div class="animate-pulse bg-slate-800 h-20 rounded-xl"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="space-y-6">
+            <h2 class="text-xl font-semibold text-white">Consolidated Ledger</h2>
+            <div class="glass rounded-2xl overflow-hidden">
+                <table class="w-full text-left border-collapse">
+                    <thead class="bg-slate-900/50">
+                        <tr>
+                            <th class="p-4 font-medium text-slate-400 border-b border-slate-800">Chain</th>
+                            <th class="p-4 font-medium text-slate-400 border-b border-slate-800">Asset</th>
+                            <th class="p-4 font-medium text-slate-400 border-b border-slate-800">Balance</th>
+                            <th class="p-4 font-medium text-slate-400 border-b border-slate-800">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledger-body">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const API_URL = 'http://localhost:3000/bundle/balance';
+        let chartInstance = null;
+
+        async function refreshDashboard() {
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+                
+                updateTable(data);
+                updateCards(data);
+                updateChart(data);
+                document.getElementById('status').innerHTML = '<span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span> API Live';
+            } catch (error) {
+                console.error('Fetch error:', error);
+                document.getElementById('status').innerHTML = '<span class="w-2 h-2 bg-red-500 rounded-full"></span> Connection Failed';
+            }
+        }
+
+        function updateTable(data) {
+            const tbody = document.getElementById('ledger-body');
+            tbody.innerHTML = data.map(item => `
+                <tr class="hover:bg-white/5 transition-colors border-b border-slate-800/50">
+                    <td class="p-4 font-mono text-sm text-blue-400">ID: ${item.chain}</td>
+                    <td class="p-4 font-bold text-white">${item.asset}</td>
+                    <td class="p-4 text-emerald-400 font-medium">${parseFloat(item.balance).toFixed(6)}</td>
+                    <td class="p-4 text-xs text-slate-500 italic">Verified</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateCards(data) {
+            const list = document.getElementById('asset-list');
+            list.innerHTML = data.map(item => `
+                <div class="glass p-4 rounded-xl flex justify-between items-center hover:translate-x-1 transition-transform">
+                    <div>
+                        <p class="text-xs text-slate-500 uppercase tracking-wider">Network ${item.chain}</p>
+                        <p class="font-bold text-lg">${item.asset}</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-blue-400 font-mono">${parseFloat(item.balance).toFixed(4)}</p>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateChart(data) {
+            const ctx = document.getElementById('portfolioChart').getContext('2d');
+            
+            const labels = data.map(i => `${i.asset} (Ch:${i.chain})`);
+            const values = data.map(i => parseFloat(i.balance));
+
+            if(chartInstance) chartInstance.destroy();
+
+            chartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: [
+                            '#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#1e40af', '#38bdf8'
+                        ],
+                        borderWidth: 0,
+                        hoverOffset: 20
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', usePointStyle: true, padding: 20 } }
+                    },
+                    cutout: '70%'
+                }
+            });
+        }
+
+        // Auto-refresh every 10 seconds
+        refreshDashboard();
+        setInterval(refreshDashboard, 10000);
+    </script>
+</body>
+</html>

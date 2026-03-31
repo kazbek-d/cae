@@ -1,46 +1,51 @@
 mod ingestion;
 mod storage;
 
-use alloy::providers::ProviderBuilder;
-use tracing::level_filters;
+use alloy::providers::{ProviderBuilder, WsConnect, Provider};
 use std::sync::Arc;
-use tokio::spawn;
+use std::env;
+use tracing::{info, error};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_max_level(level_filters::LevelFilter::INFO)
-        .init();
+    tracing_subscriber::fmt::init();
+    dotenv::dotenv().ok();
 
-    let db_url = std::env::var("DATABASE_URL")?;
-    let pool = sqlx::PgPool::connect(&db_url).await?;
+    let pool = sqlx::PgPool::connect(&env::var("DATABASE_URL")?).await?;
 
-    // Define the networks you want to index
     let networks = vec![
-        (1, "ETH_RPC_URL"),       // Ethereum Mainnet
-        //(42161, "ARB_RPC_URL"),   // Arbitrum
-        //(8453, "BASE_RPC_URL"),   // Base
+        (1, "ETH_RPC_URL"),
+        (42161, "ARB_RPC_URL"),
+        (8453, "BASE_RPC_URL"),
     ];
 
-    // 1. Spawn a single Worker to process everything in the DB
-    let pool_worker = pool.clone();
-    spawn(async move {
-        if let Err(e) = ingestion::worker::run_worker(pool_worker).await {
-            tracing::error!("Global Worker crashed: {:?}", e);
-        }
-    });
-
-    // 2. Spawn a Fetcher for each network
     for (chain_id, env_var) in networks {
-        let rpc_url = std::env::var(env_var)?.parse()?;
-        let provider = Arc::new(ProviderBuilder::new().connect_http(rpc_url));
-        let pool_fetcher = pool.clone();
+        let pool = pool.clone();
+        let rpc_url = match env::var(env_var) {
+            Ok(url) => url,
+            Err(_) => continue,
+        };
 
-        spawn(async move {
-            if let Err(e) = ingestion::fetcher::run_fetcher(provider, pool_fetcher, chain_id).await {
-                tracing::error!("Fetcher for Chain {} crashed: {:?}", chain_id, e);
-            }
+        tokio::spawn(async move {
+            info!("Chain {}: Connecting...", chain_id);
+            let ws = WsConnect::new(rpc_url);
+            let provider = Arc::new(ProviderBuilder::new().on_ws(ws).await.unwrap());
+            let watchlist = storage::get_watchlist(&pool).await.unwrap_or_default();
+
+            // 1. Backfill (Last 5000 blocks)
+            let current = provider.get_block_number().await.unwrap();
+            let backfiller = ingestion::fetcher::Backfiller::new(provider.clone(), pool.clone());
+            let _ = backfiller.scan_history(chain_id, &watchlist, current - 5000).await;
+
+            // 2. Worker
+            let p_worker = pool.clone();
+            let pr_worker = provider.clone();
+            tokio::spawn(async move {
+                ingestion::worker::run_worker(p_worker, pr_worker, chain_id).await.unwrap();
+            });
+
+            // 3. Real-time Listener
+            ingestion::fetcher::run_realtime_listener(provider, pool, chain_id, watchlist).await.unwrap();
         });
     }
 

@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cae-types = { path = "../cae-types" }
-axum = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
-dotenvy = { workspace = true }
-eyre = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dotenv = { workspace = true }
