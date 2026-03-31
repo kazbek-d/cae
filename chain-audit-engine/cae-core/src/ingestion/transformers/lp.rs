@@ -14,7 +14,7 @@ pub struct LpTransformer;
 impl LpTransformer {
     pub fn transform(log: &Log, chain_id: u64, watchlist: &[Address]) -> Option<AuditEntry> {
         if let Ok(mint) = log.log_decode::<IUniswapV2::Mint>() {
-            if watchlist.contains(&mint.sender) {
+            if watchlist.contains(&mint.inner.sender) {
                 return Some(AuditEntry {
                     chain_id, tx_hash: log.transaction_hash.unwrap().to_string(),
                     event_name: "LpMint".into(), token_address: log.address(),
@@ -24,7 +24,7 @@ impl LpTransformer {
             }
         }
         if let Ok(swap) = log.log_decode::<IUniswapV2::Swap>() {
-            if watchlist.contains(&swap.sender) || watchlist.contains(&swap.to) {
+            if watchlist.contains(&swap.inner.sender) || watchlist.contains(&swap.inner.to) {
                 return Some(AuditEntry {
                     chain_id, tx_hash: log.transaction_hash.unwrap().to_string(),
                     event_name: "Swap".into(), token_address: log.address(),

@@ -8,7 +8,7 @@ sol!(event Transfer(address indexed from, address indexed to, uint256 value););
 pub struct Erc20Transformer;
 impl Erc20Transformer {
     pub fn transform(log: &Log, chain_id: u64, watchlist: &[Address]) -> Option<AuditEntry> {
-        let transfer = log.log_decode::<Transfer>().ok()?.data;
+        let transfer = log.log_decode::<Transfer>().ok()?.inner.data;
         let is_from = watchlist.contains(&transfer.from);
         let is_to = watchlist.contains(&transfer.to);
         if !is_from && !is_to { return None; }

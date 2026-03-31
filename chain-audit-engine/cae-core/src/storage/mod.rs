@@ -1,5 +1,5 @@
 use sqlx::{PgPool, Row};
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Log;
 use alloy::providers::Provider;
 use crate::ingestion::transformers::IERC20Metadata;
@@ -42,13 +42,12 @@ pub async fn get_or_discover_token<P: Provider>(pool: &PgPool, provider: Arc<P>,
     let contract = IERC20Metadata::new(addr, provider);
     let symbol = contract.symbol().call().await.map(|s| s._0).unwrap_or("?".into());
     let decimals = contract.decimals().call().await.map(|d| d._0 as i32).unwrap_or(18);
-    sqlx::query!("INSERT INTO token_metadata (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", chain_id as i64, addr.as_slice(), symbol, decimals).execute(pool).await?;
+    sqlx::query!("INSERT INTO token_metadata (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4)", chain_id as i64, addr.as_slice(), symbol, decimals).execute(pool).await?;
     Ok((symbol, decimals))
 }
 
 pub async fn save_audit_entry(pool: &PgPool, entry: AuditEntry) -> eyre::Result<()> {
-    sqlx::query!(
-        "INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    sqlx::query!("INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         entry.chain_id as i64, entry.tx_hash, entry.event_name, entry.token_address.as_slice(), entry.amount_delta, entry.intent.to_string(), entry.description
     ).execute(pool).await?;
     Ok(())

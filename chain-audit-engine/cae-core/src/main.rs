@@ -1,7 +1,7 @@
 mod ingestion;
 mod storage;
 
-use alloy::providers::{ProviderBuilder, WsConnect, Provider};
+use alloy::providers::{ProviderBuilder, HttpProvider};
 use std::sync::Arc;
 use std::env;
 use tracing::{info, error};
@@ -11,7 +11,8 @@ async fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
     dotenv::dotenv().ok();
 
-    let pool = sqlx::PgPool::connect(&env::var("DATABASE_URL")?).await?;
+    let db_url = env::var("DATABASE_URL")?;
+    let pool = sqlx::PgPool::connect(&db_url).await?;
 
     let networks = vec![
         (1, "ETH_RPC_URL"),
@@ -27,25 +28,25 @@ async fn main() -> eyre::Result<()> {
         };
 
         tokio::spawn(async move {
-            info!("Chain {}: Connecting...", chain_id);
-            let ws = WsConnect::new(rpc_url);
-            let provider = Arc::new(ProviderBuilder::new().on_ws(ws).await.unwrap());
+            info!("Chain {}: Initializing Polling Mode", chain_id);
+            let provider = Arc::new(ProviderBuilder::new().on_http(rpc_url.parse().unwrap()));
             let watchlist = storage::get_watchlist(&pool).await.unwrap_or_default();
 
-            // 1. Backfill (Last 5000 blocks)
-            let current = provider.get_block_number().await.unwrap();
-            let backfiller = ingestion::fetcher::Backfiller::new(provider.clone(), pool.clone());
-            let _ = backfiller.scan_history(chain_id, &watchlist, current - 5000).await;
+            // 1. Backfill & Alchemy History
+            let bf = ingestion::fetcher::Backfiller::new(provider.clone(), pool.clone());
+            for addr in &watchlist {
+                let _ = bf.scan_wallet_history(&format!("{:?}", addr), chain_id).await;
+            }
 
             // 2. Worker
-            let p_worker = pool.clone();
-            let pr_worker = provider.clone();
+            let p_w = pool.clone();
+            let pr_w = provider.clone();
             tokio::spawn(async move {
-                ingestion::worker::run_worker(p_worker, pr_worker, chain_id).await.unwrap();
+                ingestion::worker::run_worker(p_w, pr_w, chain_id).await.unwrap();
             });
 
-            // 3. Real-time Listener
-            ingestion::fetcher::run_realtime_listener(provider, pool, chain_id, watchlist).await.unwrap();
+            // 3. Polling Fetcher
+            ingestion::fetcher::run_polling_fetcher(provider, pool, chain_id, watchlist).await.unwrap();
         });
     }
 
