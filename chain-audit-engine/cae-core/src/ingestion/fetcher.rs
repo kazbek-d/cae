@@ -1,11 +1,11 @@
 use alloy::providers::Provider;
-use alloy::rpc::types::{BlockTransactionsKind, Filter};
+use alloy::rpc::types::Filter;
 use std::sync::Arc;
 use crate::storage;
 use alloy::primitives::Address;
 use cae_types::TransactionIntent;
 use serde_json::json;
-use tracing::{info, error};
+use tracing::info;
 
 pub struct Backfiller<P> { provider: Arc<P>, pool: sqlx::PgPool }
 
@@ -33,7 +33,7 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
     loop {
         if let Ok(current) = provider.get_block_number().await {
             for block_num in (last_processed + 1)..=current {
-                let block = provider.get_block_by_number(block_num.into(), BlockTransactionsKind::Full).await?.unwrap();
+                let block = provider.get_block_by_number(block_num.into(), true).await?.unwrap();
                 for tx in block.transactions.as_transactions().unwrap() {
                     let from_w = watchlist.contains(&tx.from);
                     let to_w = tx.to.map_or(false, |t| watchlist.contains(&t));

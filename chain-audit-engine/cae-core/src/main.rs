@@ -1,10 +1,10 @@
 mod ingestion;
 mod storage;
 
-use alloy::providers::{ProviderBuilder, HttpProvider};
+use alloy::providers::ProviderBuilder;
 use std::sync::Arc;
 use std::env;
-use tracing::{info, error};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -29,7 +29,8 @@ async fn main() -> eyre::Result<()> {
 
         tokio::spawn(async move {
             info!("Chain {}: Initializing Polling Mode", chain_id);
-            let provider = Arc::new(ProviderBuilder::new().on_http(rpc_url.parse().unwrap()));
+            let provider = ProviderBuilder::new().on_http(rpc_url.parse().unwrap()).boxed();
+            let provider = Arc::new(provider);
             let watchlist = storage::get_watchlist(&pool).await.unwrap_or_default();
 
             // 1. Backfill & Alchemy History
