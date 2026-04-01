@@ -36,3 +36,7 @@ CREATE TABLE IF NOT EXISTS watch_list (
     address BYTEA PRIMARY KEY,
     label TEXT
 );
+
+-- Add Wintermute (High Activity Market Maker)
+INSERT INTO watch_list (address, label) 
+VALUES (DECODE('0000006daea1723962647b73127d6cff30108cb0', 'hex'), 'Wintermute: Trader');
