@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS watch_list (
     label TEXT
 );
 
--- Add Wintermute (High Activity Market Maker)
-INSERT INTO watch_list (address, label) 
-VALUES (DECODE('0000006daea1723962647b73127d6cff30108cb0', 'hex'), 'Wintermute: Trader');
+INSERT INTO watch_list (address, label) VALUES 
+(DECODE('3DdfA8eC3052539b6C9549F12beA232742307E56', 'hex'), 'Justin Sun (DeFi Whale)'),
+(DECODE('0000006daea1723962647b73127d6cff30108cb0', 'hex'), 'Wintermute (Market Maker)'),
+(DECODE('28C6c06290CC3F951793962b0a3D65b7A0a3D0A3', 'hex'), 'Binance 14 (Hot Wallet)');

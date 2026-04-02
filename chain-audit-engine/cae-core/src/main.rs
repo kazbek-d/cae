@@ -8,7 +8,9 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     dotenv::dotenv().ok();
 
     let db_url = env::var("DATABASE_URL")?;

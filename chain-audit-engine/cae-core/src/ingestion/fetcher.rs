@@ -5,7 +5,7 @@ use crate::storage;
 use alloy::primitives::Address;
 use cae_types::TransactionIntent;
 use serde_json::json;
-use tracing::{info, debug};
+use tracing::{info, debug, warn, error};
 
 pub struct Backfiller<P> { provider: Arc<P>, pool: sqlx::PgPool }
 
@@ -94,7 +94,7 @@ impl<P: Provider + 'static> Backfiller<P> {
     }
 }
 
-pub async fn run_polling_fetcher<P: Provider + 'static>(
+pub async fn run_polling_fetcher_old<P: Provider + 'static>(
     provider: Arc<P>, pool: sqlx::PgPool, chain_id: u64, watchlist: Vec<Address>
 ) -> eyre::Result<()> {
     let mut last_processed = provider.get_block_number().await?;
@@ -117,6 +117,109 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 last_processed = block_num;
             }
         }
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+}
+
+
+pub async fn run_polling_fetcher<P: Provider + 'static>(
+    provider: Arc<P>, 
+    pool: sqlx::PgPool, 
+    chain_id: u64, 
+    watchlist: Vec<Address>
+) -> eyre::Result<()> {
+    // Initial sync: get the current block height to start polling from
+    let mut last_processed = provider.get_block_number().await?;
+    
+    info!(
+        chain_id, 
+        start_block = last_processed, 
+        watchlist_len = watchlist.len(), 
+        "Fetcher initialized and starting real-time poll"
+    );
+
+    loop {
+        // Fetch current block height from the node
+        if let Ok(current) = provider.get_block_number().await {
+            
+            // Iterate through every new block found since the last loop
+            for block_num in (last_processed + 1)..=current {
+                info!(chain_id, block_num, "Scanning block for activity");
+
+                // Get block details including full transaction objects
+                let block = match provider.get_block_by_number(block_num.into(), true).await? {
+                    Some(b) => b,
+                    None => {
+                        warn!(block_num, "Block not returned by provider, skipping");
+                        continue;
+                    }
+                };
+
+                // --- Part 1: Native ETH Transfer Detection ---
+                let transactions = block.transactions.as_transactions().unwrap();
+                let mut native_count = 0;
+
+                for tx in transactions {
+                    let from_w = watchlist.contains(&tx.from);
+                    let to_w = tx.to.map_or(false, |t| watchlist.contains(&t));
+
+                    // Check if the transaction involves a watched address and has a non-zero value
+                    if (from_w || to_w) && tx.value > alloy::primitives::U256::ZERO {
+                        let intent = if from_w && to_w { 
+                            TransactionIntent::InternalTransfer 
+                        } else if to_w { 
+                            TransactionIntent::Inbound 
+                        } else { 
+                            TransactionIntent::Outbound 
+                        };
+
+                        debug!(tx_hash = %tx.hash, "Relevant native ETH transfer found");
+                        
+                        storage::save_native_transfer(
+                            &pool, 
+                            chain_id, 
+                            tx.hash, 
+                            tx.value, 
+                            intent, 
+                            "Native ETH".into()
+                        ).await?;
+                        
+                        native_count += 1;
+                    }
+                }
+
+                // --- Part 2: Smart Contract Log Detection (ERC20, LP, etc.) ---
+                // Filter logs emitted by any address in the watchlist within this block
+                let filter = Filter::new()
+                    .from_block(block_num)
+                    .to_block(block_num)
+                    .address(watchlist.clone());
+
+                let logs = provider.get_logs(&filter).await?;
+                let log_count = logs.len();
+
+                for log in logs {
+                    storage::save_raw_log(&pool, chain_id, &log).await?;
+                }
+
+                // Summary log for the processed block if activity was found
+                if native_count > 0 || log_count > 0 {
+                    info!(
+                        block = block_num, 
+                        eth_transfers = native_count, 
+                        token_logs = log_count, 
+                        "Activity detected and saved"
+                    );
+                }
+
+                // Update the tracker so we don't process this block again
+                last_processed = block_num;
+            }
+        } else {
+            error!(chain_id, "Failed to fetch latest block number from provider");
+        }
+
+        // Wait before polling for new blocks again
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
