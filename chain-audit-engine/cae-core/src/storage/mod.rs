@@ -20,11 +20,11 @@ pub async fn save_raw_log(pool: &PgPool, chain_id: u64, log: &Log) -> eyre::Resu
     let topics: Vec<Vec<u8>> = log.topics().iter().map(|t| t.as_slice().to_vec()).collect();
     sqlx::query!(
         "INSERT INTO transaction_logs (chain_id, tx_hash, log_index, address, data, topics) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-        chain_id as i64, 
-        log.transaction_hash.unwrap().to_string(), 
-        log.log_index.unwrap() as i32, 
-        log.inner.address.as_slice(), 
-        log.data().data.as_ref(), 
+        chain_id as i64,
+        log.transaction_hash.unwrap().to_string(),
+        log.log_index.unwrap() as i32,
+        log.inner.address.as_slice(),
+        log.data().data.as_ref(),
         &topics
     ).execute(pool).await?;
     Ok(())
@@ -40,12 +40,12 @@ pub async fn save_native_transfer(
 ) -> eyre::Result<()> {
     sqlx::query!(
         "INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        chain_id as i64, 
-        tx_hash.to_string(), 
-        "NativeTransfer", 
-        Address::ZERO.as_slice(), 
-        amount.to_string(), 
-        intent.to_string(), 
+        chain_id as i64,
+        tx_hash.to_string(),
+        "NativeTransfer",
+        Address::ZERO.as_slice(),
+        amount.to_string(),
+        intent.to_string(),
         desc
     ).execute(pool).await?;
     Ok(())
@@ -107,12 +107,12 @@ pub async fn get_or_discover_token<P: Provider>(
 
 pub async fn save_audit_entry(pool: &PgPool, entry: AuditEntry) -> eyre::Result<()> {
     sqlx::query!("INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        entry.chain_id as i64, 
-        entry.tx_hash, 
-        entry.event_name, 
-        entry.token_address.as_slice(), 
-        entry.amount_delta, 
-        entry.intent.to_string(), 
+        entry.chain_id as i64,
+        entry.tx_hash,
+        entry.event_name,
+        entry.token_address.as_slice(),
+        entry.amount_delta,
+        entry.intent.to_string(),
         entry.description
     ).execute(pool).await?;
     Ok(())
