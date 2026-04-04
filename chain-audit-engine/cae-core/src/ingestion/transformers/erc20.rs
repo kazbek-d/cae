@@ -11,16 +11,25 @@ impl Erc20Transformer {
         let transfer = log.log_decode::<Transfer>().ok()?.inner.data;
         let is_from = watchlist.contains(&transfer.from);
         let is_to = watchlist.contains(&transfer.to);
-        if !is_from && !is_to { return None; }
+        if !is_from && !is_to {
+            return None;
+        }
 
-        let intent = if is_from && is_to { TransactionIntent::InternalTransfer }
-                     else if is_to { TransactionIntent::Inbound }
-                     else { TransactionIntent::Outbound };
+        let intent = if is_from && is_to {
+            TransactionIntent::InternalTransfer
+        } else if is_to {
+            TransactionIntent::Inbound
+        } else {
+            TransactionIntent::Outbound
+        };
 
         Some(AuditEntry {
-            chain_id, tx_hash: log.transaction_hash.unwrap().to_string(),
-            event_name: "Transfer".into(), token_address: log.address(),
-            amount_delta: transfer.value.to_string(), intent,
+            chain_id,
+            tx_hash: log.transaction_hash.unwrap().to_string(),
+            event_name: "Transfer".into(),
+            token_address: log.address(),
+            amount_delta: transfer.value.to_string(),
+            intent,
             description: "ERC20 Movement".into(),
         })
     }

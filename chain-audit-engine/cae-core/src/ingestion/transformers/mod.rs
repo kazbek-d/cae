@@ -4,7 +4,7 @@ pub mod lp;
 use alloy::sol;
 
 sol! {
-    #[sol(rpc)] 
+    #[sol(rpc)]
     interface IERC20Metadata {
         function symbol() external view returns (string);
         function decimals() external view returns (uint8);
