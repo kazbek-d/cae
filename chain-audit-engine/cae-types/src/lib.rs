@@ -29,5 +29,6 @@ pub struct AuditEntry {
     pub token_address: Address,
     pub amount_delta: String,
     pub intent: TransactionIntent,
+    pub wallet_address: Option<Address>,
     pub description: String,
 }

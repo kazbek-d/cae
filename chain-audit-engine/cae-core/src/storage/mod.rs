@@ -36,18 +36,22 @@ pub async fn save_native_transfer(
     tx_hash: B256,
     amount: U256,
     intent: TransactionIntent,
+    wallet: Address,
     desc: String,
 ) -> eyre::Result<()> {
-    sqlx::query!(
-        "INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        chain_id as i64,
-        tx_hash.to_string(),
-        "NativeTransfer",
-        Address::ZERO.as_slice(),
-        amount.to_string(),
-        intent.to_string(),
-        desc
-    ).execute(pool).await?;
+    sqlx::query(
+        "INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, wallet_address, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(chain_id as i64)
+    .bind(tx_hash.to_string())
+    .bind("NativeTransfer")
+    .bind(Address::ZERO.as_slice())
+    .bind(amount.to_string())
+    .bind(intent.to_string())
+    .bind(wallet.as_slice())
+    .bind(desc)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -106,15 +110,17 @@ pub async fn get_or_discover_token<P: Provider>(
 }
 
 pub async fn save_audit_entry(pool: &PgPool, entry: AuditEntry) -> eyre::Result<()> {
-    sqlx::query!("INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, description) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        entry.chain_id as i64,
-        entry.tx_hash,
-        entry.event_name,
-        entry.token_address.as_slice(),
-        entry.amount_delta,
-        entry.intent.to_string(),
-        entry.description
-    ).execute(pool).await?;
+    sqlx::query("INSERT INTO ledger_entries (chain_id, tx_hash, event_name, token_address, amount_delta, intent, wallet_address, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+        .bind(entry.chain_id as i64)
+        .bind(entry.tx_hash)
+        .bind(entry.event_name)
+        .bind(entry.token_address.as_slice())
+        .bind(entry.amount_delta)
+        .bind(entry.intent.to_string())
+        .bind(entry.wallet_address.map(|a| a.as_slice().to_vec()))
+        .bind(entry.description)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

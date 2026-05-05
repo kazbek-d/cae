@@ -22,6 +22,7 @@ impl LpTransformer {
                     token_address: log.address(),
                     amount_delta: "0".into(),
                     intent: TransactionIntent::LiquidityProvision,
+                    wallet_address: Some(mint.inner.sender),
                     description: "Liquidity Provided".into(),
                 });
             }
@@ -35,6 +36,7 @@ impl LpTransformer {
                     token_address: log.address(),
                     amount_delta: "0".into(),
                     intent: TransactionIntent::Swap,
+                    wallet_address: Some(if watchlist.contains(&swap.inner.to) { swap.inner.to } else { swap.inner.sender }),
                     description: "DEX Swap Detected".into(),
                 });
             }

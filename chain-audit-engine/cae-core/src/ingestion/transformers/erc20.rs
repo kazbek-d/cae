@@ -30,6 +30,7 @@ impl Erc20Transformer {
             token_address: log.address(),
             amount_delta: transfer.value.to_string(),
             intent,
+            wallet_address: Some(if is_to { transfer.to } else { transfer.from }),
             description: "ERC20 Movement".into(),
         })
     }

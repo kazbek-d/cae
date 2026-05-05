@@ -11,3 +11,4 @@ tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dotenv = { workspace = true }
+hex = { workspace = true }

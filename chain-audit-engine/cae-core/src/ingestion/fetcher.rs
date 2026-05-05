@@ -40,7 +40,7 @@ impl<P: Provider + 'static> Backfiller<P> {
             .request("alchemy_getAssetTransfers", (params_out,))
             .await?;
 
-        self.ingest_alchemy_transfers(res_out, chain_id, TransactionIntent::Outbound)
+        self.ingest_alchemy_transfers(res_out, chain_id, TransactionIntent::Outbound, wallet)
             .await?;
 
         // 2. Scan INBOUND transfers (toAddress)
@@ -60,7 +60,7 @@ impl<P: Provider + 'static> Backfiller<P> {
             .request("alchemy_getAssetTransfers", (params_in,))
             .await?;
 
-        self.ingest_alchemy_transfers(res_in, chain_id, TransactionIntent::Inbound)
+        self.ingest_alchemy_transfers(res_in, chain_id, TransactionIntent::Inbound, wallet)
             .await?;
 
         info!("Alchemy history scan completed for {}", wallet);
@@ -73,6 +73,7 @@ impl<P: Provider + 'static> Backfiller<P> {
         response: serde_json::Value,
         chain_id: u64,
         intent: TransactionIntent,
+        wallet_addr: &str,
     ) -> eyre::Result<()> {
         if let Some(transfers) = response["transfers"].as_array() {
             for tx in transfers {
@@ -131,6 +132,7 @@ impl<P: Provider + 'static> Backfiller<P> {
                     token_address: token_addr,
                     amount_delta: amount,
                     intent: intent.clone(),
+                    wallet_address: wallet_addr.parse().ok(),
                     description: format!(
                         "Historical {} {} transfer synced via Alchemy",
                         symbol,
@@ -180,7 +182,8 @@ pub async fn run_polling_fetcher_old<P: Provider + 'static>(
                             *tx.inner.tx_hash(),
                             tx.inner.value(),
                             intent,
-                            "Native ETH".into(),
+                            if to_w { Address::from(*tx.inner.to().unwrap()) } else { tx.inner.signer() },
+                            "Native ETH".to_string(),
                         )
                         .await?;
                     }
@@ -217,6 +220,9 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
     );
 
     loop {
+        // Dynamically reload the watchlist to pick up newly added wallets
+        let active_watchlist = storage::get_watchlist(&pool).await.unwrap_or_else(|_| watchlist.clone());
+
         // Fetch current block height from the node
         if let Ok(current) = provider.get_block_number().await {
             // Iterate through every new block found since the last loop
@@ -224,7 +230,7 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 info!(chain_id, block_num, "Scanning block for activity");
 
                 // Get block details including full transaction objects
-                let block = match provider.get_block_by_number(block_num.into()).await? {
+                let block = match provider.get_block_by_number(block_num.into()).full().await? {
                     Some(b) => b,
                     None => {
                         warn!(block_num, "Block not returned by provider, skipping");
@@ -233,12 +239,22 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 };
 
                 // --- Part 1: Native ETH Transfer Detection ---
-                let transactions = block.transactions.as_transactions().unwrap();
+                let transactions = match block.transactions.as_transactions() {
+                    Some(txs) => txs,
+                    None => {
+                        if block.transactions.len() == 0 {
+                            &[]
+                        } else {
+                            warn!("Block transactions were not hydrated, skipping block {}", block_num);
+                            continue;
+                        }
+                    }
+                };
                 let mut native_count = 0;
 
                 for tx in transactions {
-                    let from_w = watchlist.contains(&tx.inner.signer());
-                    let to_w = tx.inner.to().map_or(false, |t| watchlist.contains(&t));
+                    let from_w = active_watchlist.contains(&tx.inner.signer());
+                    let to_w = tx.inner.to().map_or(false, |t| active_watchlist.contains(&t));
 
                     // Check if the transaction involves a watched address and has a non-zero value
                     if (from_w || to_w) && tx.inner.value() > alloy::primitives::U256::ZERO {
@@ -258,7 +274,8 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                             *tx.inner.tx_hash(),
                             tx.inner.value(),
                             intent,
-                            "Native ETH".into(),
+                            if to_w { Address::from(*tx.inner.to().unwrap()) } else { tx.inner.signer() },
+                            "Native ETH".to_string(),
                         )
                         .await?;
 
@@ -271,7 +288,7 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 let filter = Filter::new()
                     .from_block(block_num)
                     .to_block(block_num)
-                    .address(watchlist.clone());
+                    .address(active_watchlist.clone());
 
                 let logs = provider.get_logs(&filter).await?;
                 let log_count = logs.len();
