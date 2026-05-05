@@ -85,13 +85,13 @@ pub async fn get_or_discover_token<P: Provider>(
         .symbol()
         .call()
         .await
-        .map(|s| s._0)
+        .map(|s| s)
         .unwrap_or("?".into());
     let decimals = contract
         .decimals()
         .call()
         .await
-        .map(|d| d._0 as i32)
+        .map(|d| d as i32)
         .unwrap_or(18);
     sqlx::query!(
         "INSERT INTO token_metadata (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4)",

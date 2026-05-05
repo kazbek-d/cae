@@ -2,6 +2,7 @@ use crate::storage;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
+use alloy::consensus::Transaction;
 use cae_types::TransactionIntent;
 use serde_json::json;
 use std::sync::Arc;
@@ -158,14 +159,14 @@ pub async fn run_polling_fetcher_old<P: Provider + 'static>(
         if let Ok(current) = provider.get_block_number().await {
             for block_num in (last_processed + 1)..=current {
                 let block = provider
-                    .get_block_by_number(block_num.into(), true)
+                    .get_block_by_number(block_num.into())
                     .await?
                     .unwrap();
-                for tx in block.transactions.as_transactions().unwrap() {
-                    let from_w = watchlist.contains(&tx.from);
-                    let to_w = tx.to.map_or(false, |t| watchlist.contains(&t));
-                    if (from_w || to_w) && tx.value > alloy::primitives::U256::ZERO {
-                        //if tx.value > alloy::primitives::U256::ZERO {
+                let transactions = block.transactions.as_transactions().unwrap();
+                for tx in transactions {
+                    let from_w = watchlist.contains(&tx.inner.signer());
+                    let to_w = tx.inner.to().map_or(false, |t| watchlist.contains(&t));
+                    if (from_w || to_w) && tx.inner.value() > alloy::primitives::U256::ZERO {
                         let intent = if from_w && to_w {
                             TransactionIntent::InternalTransfer
                         } else if to_w {
@@ -176,8 +177,8 @@ pub async fn run_polling_fetcher_old<P: Provider + 'static>(
                         storage::save_native_transfer(
                             &pool,
                             chain_id,
-                            tx.hash,
-                            tx.value,
+                            *tx.inner.tx_hash(),
+                            tx.inner.value(),
                             intent,
                             "Native ETH".into(),
                         )
@@ -223,7 +224,7 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 info!(chain_id, block_num, "Scanning block for activity");
 
                 // Get block details including full transaction objects
-                let block = match provider.get_block_by_number(block_num.into(), true).await? {
+                let block = match provider.get_block_by_number(block_num.into()).await? {
                     Some(b) => b,
                     None => {
                         warn!(block_num, "Block not returned by provider, skipping");
@@ -236,11 +237,11 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                 let mut native_count = 0;
 
                 for tx in transactions {
-                    let from_w = watchlist.contains(&tx.from);
-                    let to_w = tx.to.map_or(false, |t| watchlist.contains(&t));
+                    let from_w = watchlist.contains(&tx.inner.signer());
+                    let to_w = tx.inner.to().map_or(false, |t| watchlist.contains(&t));
 
                     // Check if the transaction involves a watched address and has a non-zero value
-                    if (from_w || to_w) && tx.value > alloy::primitives::U256::ZERO {
+                    if (from_w || to_w) && tx.inner.value() > alloy::primitives::U256::ZERO {
                         let intent = if from_w && to_w {
                             TransactionIntent::InternalTransfer
                         } else if to_w {
@@ -249,13 +250,13 @@ pub async fn run_polling_fetcher<P: Provider + 'static>(
                             TransactionIntent::Outbound
                         };
 
-                        debug!(tx_hash = %tx.hash, "Relevant native ETH transfer found");
+                        debug!(tx_hash = %tx.inner.tx_hash(), "Relevant native ETH transfer found");
 
                         storage::save_native_transfer(
                             &pool,
                             chain_id,
-                            tx.hash,
-                            tx.value,
+                            *tx.inner.tx_hash(),
+                            tx.inner.value(),
                             intent,
                             "Native ETH".into(),
                         )

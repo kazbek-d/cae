@@ -41,7 +41,7 @@ async fn main() -> eyre::Result<()> {
 async fn initialize_network(chain_id: u64, rpc_url: String, pool: PgPool) -> eyre::Result<()> {
     info!("Chain {chain_id}: Initializing Polling Mode");
 
-    let provider = ProviderBuilder::new().on_http(rpc_url.parse()?).boxed();
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let provider = Arc::new(provider);
     let watchlist = storage::get_watchlist(&pool).await.unwrap_or_default();
 

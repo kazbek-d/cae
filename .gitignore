@@ -2,3 +2,7 @@
 .DS_Store
 
 .env 
+chain-audit-engine/api.log
+chain-audit-engine/core.log
+chain-audit-engine/frontend.log
+chain-audit-engine/test_alloy.rs
