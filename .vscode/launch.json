@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug cae-core",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=cae-core",
+                    "--manifest-path=chain-audit-engine/Cargo.toml"
+                ],
+                "filter": {
+                    "name": "cae-core",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug cae-api",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=cae-api",
+                    "--manifest-path=chain-audit-engine/Cargo.toml"
+                ],
+                "filter": {
+                    "name": "cae-api",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

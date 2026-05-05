@@ -1,5 +1,5 @@
 use crate::storage;
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use cae_types::TransactionIntent;
@@ -77,14 +77,51 @@ impl<P: Provider + 'static> Backfiller<P> {
             for tx in transfers {
                 let tx_hash = tx["hash"].as_str().unwrap_or_default().to_string();
 
-                // Alchemy returns "null" or "0x0" for Native ETH transfers in the address field.
+                // Alchemy returns null for Native ETH transfers in the address field.
                 let raw_addr = tx["rawContract"]["address"]
                     .as_str()
                     .unwrap_or("0x0000000000000000000000000000000000000000");
                 let token_addr: Address = raw_addr.parse().unwrap_or(Address::ZERO);
 
-                // Extract the transfer amount as a string.
-                let amount = tx["value"].as_f64().unwrap_or(0.0).to_string();
+                // Parse symbol and decimals from Alchemy response.
+                let symbol = tx["asset"].as_str().unwrap_or("UNK").to_string();
+                let dec_hex = tx["rawContract"]["decimal"].as_str().unwrap_or("0x12");
+                let decimals = i64::from_str_radix(
+                    dec_hex.trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap_or(18) as i32;
+
+                // Use raw integer amount (wei/smallest unit) so the balance SQL
+                // division by POW(10, decimals) produces the correct result.
+                let amount = if let Some(hex) = tx["rawContract"]["value"].as_str() {
+                    U256::from_str_radix(hex.trim_start_matches("0x"), 16)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|_| {
+                            // Fallback: scale human-readable float by decimals.
+                            let f = tx["value"].as_f64().unwrap_or(0.0);
+                            let scale = 10u128.pow(decimals as u32);
+                            ((f * scale as f64) as u128).to_string()
+                        })
+                } else {
+                    // Native ETH — scale value by 10^18.
+                    let f = tx["value"].as_f64().unwrap_or(0.0);
+                    ((f * 1e18) as u128).to_string()
+                };
+
+                // Populate token_metadata from Alchemy data (avoids expensive on-chain calls).
+                if token_addr != Address::ZERO {
+                    let _ = sqlx::query!(
+                        "INSERT INTO token_metadata (chain_id, address, symbol, decimals) \
+                         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                        chain_id as i64,
+                        token_addr.as_slice(),
+                        symbol,
+                        decimals
+                    )
+                    .execute(&self.pool)
+                    .await;
+                }
 
                 let entry = cae_types::AuditEntry {
                     chain_id,
@@ -94,13 +131,13 @@ impl<P: Provider + 'static> Backfiller<P> {
                     amount_delta: amount,
                     intent: intent.clone(),
                     description: format!(
-                        "Historical {} transfer synced via Alchemy",
+                        "Historical {} {} transfer synced via Alchemy",
+                        symbol,
                         intent.to_string()
                     ),
                 };
 
-                // Attempt to save to the ledger.
-                // duplicates are ignored via SQL unique constraints (chain_id, tx_hash, log_index).
+                // Attempt to save to the ledger; silently skip duplicates.
                 if let Err(e) = storage::save_audit_entry(&self.pool, entry).await {
                     debug!("Skipping duplicate or invalid historical entry: {}", e);
                 }
