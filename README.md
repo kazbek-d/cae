@@ -51,4 +51,7 @@ The CAE architecture follows a hybrid **Lambda/Kappa pattern**, ensuring a perfe
 
 * **LinkedIn:** [linkedin.com/in/kazbek-dzarasov-6769a83a](https://linkedin.com/in/kazbek-dzarasov-6769a83a)
 * **GitHub:** [github.com/kazbek-d/cae](https://github.com/kazbek-d/cae)
-* **Target Market:** Houston, TX
+* ### 🌐 Target Market & Deployment Infrastructure
+* **Headquarters:** Austin, Texas, USA (The Silicon Hills technology corridor)
+* **Primary Enterprise Hubs:** Houston, TX (Texas Medical Center ecosystem for Healthcare Web3 deployments) & Dallas, TX (Financial Districts)
+* **Regulatory Alignment:** Specifically engineered to comply with US Federal mandates, IRS digital asset reporting standards, and the Corporate Transparency Act (CTA) enforced by FinCEN.
