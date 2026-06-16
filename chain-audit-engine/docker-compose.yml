@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password123
-      POSTGRES_DB: audit_db
+      POSTGRES_DB: cae_db
     ports:
       - "5432:5432"
     volumes:

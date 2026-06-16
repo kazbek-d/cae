@@ -1,85 +1,323 @@
+use crate::storage;
+use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
-use sqlx::PgPool;
+use alloy::consensus::Transaction;
+use cae_types::TransactionIntent;
+use serde_json::json;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
-use crate::storage;
+use tracing::{debug, error, info, warn};
 
-/// The Fetcher is responsible for pulling raw logs from a specific blockchain 
-/// and persisting them into the transaction_logs table.
-pub async fn run_fetcher<P>(
+pub struct Backfiller<P> {
     provider: Arc<P>,
-    pool: PgPool,
-    chain_id: u64,
-) -> eyre::Result<()> 
-where 
-    P: Provider + 'static 
-{
-    tracing::info!(target: "cae_fetcher", "Starting fetcher for Chain ID: {}", chain_id);
+    pool: sqlx::PgPool,
+}
 
-    // 1. Determine polling interval based on the chain
-    let poll_interval = match chain_id {
-        1 => Duration::from_secs(12),      // Ethereum Mainnet
-        42161 | 8453 => Duration::from_secs(2), // Arbitrum/Base (Fast blocks)
-        _ => Duration::from_secs(5),       // Default
-    };
+impl<P: Provider + 'static> Backfiller<P> {
+    pub fn new(provider: Arc<P>, pool: sqlx::PgPool) -> Self {
+        Self { provider, pool }
+    }
 
-    // 2. Initialize the starting block
-    // In a real app, you would fetch the 'last_synced_block' from the DB
-    let mut last_processed_block = provider.get_block_number().await?;
+    /// Scans the full history of a wallet using Alchemy's Asset Transfer API.
+    /// This method bypasses block-by-block syncing for historical data to fill the ledger quickly.
+    pub async fn scan_wallet_history(&self, wallet: &str, chain_id: u64) -> eyre::Result<()> {
+        info!("Starting Alchemy history scan for wallet: {}", wallet);
 
-    loop {
-        // Get the current tip of the chain
-        let current_block = match provider.get_block_number().await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(target: "cae_fetcher", "Chain {}: Failed to get latest block: {:?}", chain_id, e);
-                sleep(Duration::from_secs(10)).await;
-                continue;
+        // 1. Scan OUTBOUND transfers (fromAddress)
+        // This identifies tokens sent away from the wallet.
+        let params_out = json!({
+            "fromBlock": "0x0",
+            "toBlock": "latest",
+            "fromAddress": wallet,
+            "category": ["external", "erc20"], // Captures both Native ETH and ERC20 tokens
+            "withMetadata": true,
+            "excludeZeroValue": true,
+        });
+
+        let res_out: serde_json::Value = self
+            .provider
+            .client()
+            .request("alchemy_getAssetTransfers", (params_out,))
+            .await?;
+
+        self.ingest_alchemy_transfers(res_out, chain_id, TransactionIntent::Outbound, wallet)
+            .await?;
+
+        // 2. Scan INBOUND transfers (toAddress)
+        // This identifies tokens received by the wallet.
+        let params_in = json!({
+            "fromBlock": "0x0",
+            "toBlock": "latest",
+            "toAddress": wallet,
+            "category": ["external", "erc20"],
+            "withMetadata": true,
+            "excludeZeroValue": true,
+        });
+
+        let res_in: serde_json::Value = self
+            .provider
+            .client()
+            .request("alchemy_getAssetTransfers", (params_in,))
+            .await?;
+
+        self.ingest_alchemy_transfers(res_in, chain_id, TransactionIntent::Inbound, wallet)
+            .await?;
+
+        info!("Alchemy history scan completed for {}", wallet);
+        Ok(())
+    }
+
+    /// Internal helper to parse Alchemy's JSON response and save entries to the database.
+    async fn ingest_alchemy_transfers(
+        &self,
+        response: serde_json::Value,
+        chain_id: u64,
+        intent: TransactionIntent,
+        wallet_addr: &str,
+    ) -> eyre::Result<()> {
+        if let Some(transfers) = response["transfers"].as_array() {
+            for tx in transfers {
+                let tx_hash = tx["hash"].as_str().unwrap_or_default().to_string();
+
+                // Alchemy returns null for Native ETH transfers in the address field.
+                let raw_addr = tx["rawContract"]["address"]
+                    .as_str()
+                    .unwrap_or("0x0000000000000000000000000000000000000000");
+                let token_addr: Address = raw_addr.parse().unwrap_or(Address::ZERO);
+
+                // Parse symbol and decimals from Alchemy response.
+                let symbol = tx["asset"].as_str().unwrap_or("UNK").to_string();
+                let dec_hex = tx["rawContract"]["decimal"].as_str().unwrap_or("0x12");
+                let decimals = i64::from_str_radix(
+                    dec_hex.trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap_or(18) as i32;
+
+                // Use raw integer amount (wei/smallest unit) so the balance SQL
+                // division by POW(10, decimals) produces the correct result.
+                let amount = if let Some(hex) = tx["rawContract"]["value"].as_str() {
+                    U256::from_str_radix(hex.trim_start_matches("0x"), 16)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|_| {
+                            // Fallback: scale human-readable float by decimals.
+                            let f = tx["value"].as_f64().unwrap_or(0.0);
+                            let scale = 10u128.pow(decimals as u32);
+                            ((f * scale as f64) as u128).to_string()
+                        })
+                } else {
+                    // Native ETH — scale value by 10^18.
+                    let f = tx["value"].as_f64().unwrap_or(0.0);
+                    ((f * 1e18) as u128).to_string()
+                };
+
+                // Populate token_metadata from Alchemy data (avoids expensive on-chain calls).
+                if token_addr != Address::ZERO {
+                    let _ = sqlx::query!(
+                        "INSERT INTO token_metadata (chain_id, address, symbol, decimals) \
+                         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                        chain_id as i64,
+                        token_addr.as_slice(),
+                        symbol,
+                        decimals
+                    )
+                    .execute(&self.pool)
+                    .await;
+                }
+
+                let entry = cae_types::AuditEntry {
+                    chain_id,
+                    tx_hash,
+                    event_name: "AlchemyHistorySync".into(),
+                    token_address: token_addr,
+                    amount_delta: amount,
+                    intent: intent.clone(),
+                    wallet_address: wallet_addr.parse().ok(),
+                    description: format!(
+                        "Historical {} {} transfer synced via Alchemy",
+                        symbol,
+                        intent.to_string()
+                    ),
+                };
+
+                // Attempt to save to the ledger; silently skip duplicates.
+                if let Err(e) = storage::save_audit_entry(&self.pool, entry).await {
+                    debug!("Skipping duplicate or invalid historical entry: {}", e);
+                }
             }
-        };
-
-        // If we are caught up, wait for new blocks
-        if current_block <= last_processed_block {
-            sleep(poll_interval).await;
-            continue;
         }
+        Ok(())
+    }
+}
 
-        // 3. Define the fetch range
-        // We limit the range to 1000 blocks per request to avoid RPC timeouts
-        let target_block = std::cmp::min(last_processed_block + 1000, current_block);
-        
-        tracing::debug!(
-            target: "cae_fetcher", 
-            "Chain {}: Syncing range {} -> {}", 
-            chain_id, last_processed_block + 1, target_block
-        );
-
-        // 4. Build the filter
-        let filter = Filter::new()
-            .from_block(last_processed_block + 1)
-            .to_block(target_block);
-
-        // 5. Fetch logs via RPC
-        match provider.get_logs(&filter).await {
-            Ok(logs) => {
-                for log in logs {
-                    // Persist raw log to the Ingestion Layer
-                    if let Err(e) = storage::save_raw_log(&pool, chain_id, &log).await {
-                        tracing::error!(target: "cae_fetcher", "Chain {}: DB Error: {:?}", chain_id, e);
+pub async fn run_polling_fetcher_old<P: Provider + 'static>(
+    provider: Arc<P>,
+    pool: sqlx::PgPool,
+    chain_id: u64,
+    watchlist: Vec<Address>,
+) -> eyre::Result<()> {
+    let mut last_processed = provider.get_block_number().await?;
+    loop {
+        if let Ok(current) = provider.get_block_number().await {
+            for block_num in (last_processed + 1)..=current {
+                let block = provider
+                    .get_block_by_number(block_num.into())
+                    .await?
+                    .unwrap();
+                let transactions = block.transactions.as_transactions().unwrap();
+                for tx in transactions {
+                    let from_w = watchlist.contains(&tx.inner.signer());
+                    let to_w = tx.inner.to().map_or(false, |t| watchlist.contains(&t));
+                    if (from_w || to_w) && tx.inner.value() > alloy::primitives::U256::ZERO {
+                        let intent = if from_w && to_w {
+                            TransactionIntent::InternalTransfer
+                        } else if to_w {
+                            TransactionIntent::Inbound
+                        } else {
+                            TransactionIntent::Outbound
+                        };
+                        storage::save_native_transfer(
+                            &pool,
+                            chain_id,
+                            *tx.inner.tx_hash(),
+                            tx.inner.value(),
+                            intent,
+                            if to_w { Address::from(*tx.inner.to().unwrap()) } else { tx.inner.signer() },
+                            "Native ETH".to_string(),
+                        )
+                        .await?;
                     }
                 }
-                
-                // Update progress
-                last_processed_block = target_block;
-            }
-            Err(e) => {
-                tracing::error!(target: "cae_fetcher", "Chain {}: RPC error during get_logs: {:?}", chain_id, e);
-                sleep(Duration::from_secs(5)).await;
+                let filter = Filter::new()
+                    .from_block(block_num)
+                    .to_block(block_num)
+                    .address(watchlist.clone());
+                let logs = provider.get_logs(&filter).await?;
+                for log in logs {
+                    storage::save_raw_log(&pool, chain_id, &log).await?;
+                }
+                last_processed = block_num;
             }
         }
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+}
 
-        // Brief throttle to avoid hitting RPC rate limits
-        sleep(Duration::from_millis(100)).await;
+pub async fn run_polling_fetcher<P: Provider + 'static>(
+    provider: Arc<P>,
+    pool: sqlx::PgPool,
+    chain_id: u64,
+    watchlist: Vec<Address>,
+) -> eyre::Result<()> {
+    // Initial sync: get the current block height to start polling from
+    let mut last_processed = provider.get_block_number().await?;
+
+    info!(
+        chain_id,
+        start_block = last_processed,
+        watchlist_len = watchlist.len(),
+        "Fetcher initialized and starting real-time poll"
+    );
+
+    loop {
+        // Dynamically reload the watchlist to pick up newly added wallets
+        let active_watchlist = storage::get_watchlist(&pool).await.unwrap_or_else(|_| watchlist.clone());
+
+        // Fetch current block height from the node
+        if let Ok(current) = provider.get_block_number().await {
+            // Iterate through every new block found since the last loop
+            for block_num in (last_processed + 1)..=current {
+                info!(chain_id, block_num, "Scanning block for activity");
+
+                // Get block details including full transaction objects
+                let block = match provider.get_block_by_number(block_num.into()).full().await? {
+                    Some(b) => b,
+                    None => {
+                        warn!(block_num, "Block not returned by provider, skipping");
+                        continue;
+                    }
+                };
+
+                // --- Part 1: Native ETH Transfer Detection ---
+                let transactions = match block.transactions.as_transactions() {
+                    Some(txs) => txs,
+                    None => {
+                        if block.transactions.len() == 0 {
+                            &[]
+                        } else {
+                            warn!("Block transactions were not hydrated, skipping block {}", block_num);
+                            continue;
+                        }
+                    }
+                };
+                let mut native_count = 0;
+
+                for tx in transactions {
+                    let from_w = active_watchlist.contains(&tx.inner.signer());
+                    let to_w = tx.inner.to().map_or(false, |t| active_watchlist.contains(&t));
+
+                    // Check if the transaction involves a watched address and has a non-zero value
+                    if (from_w || to_w) && tx.inner.value() > alloy::primitives::U256::ZERO {
+                        let intent = if from_w && to_w {
+                            TransactionIntent::InternalTransfer
+                        } else if to_w {
+                            TransactionIntent::Inbound
+                        } else {
+                            TransactionIntent::Outbound
+                        };
+
+                        debug!(tx_hash = %tx.inner.tx_hash(), "Relevant native ETH transfer found");
+
+                        storage::save_native_transfer(
+                            &pool,
+                            chain_id,
+                            *tx.inner.tx_hash(),
+                            tx.inner.value(),
+                            intent,
+                            if to_w { Address::from(*tx.inner.to().unwrap()) } else { tx.inner.signer() },
+                            "Native ETH".to_string(),
+                        )
+                        .await?;
+
+                        native_count += 1;
+                    }
+                }
+
+                // --- Part 2: Smart Contract Log Detection (ERC20, LP, etc.) ---
+                // Filter logs emitted by any address in the watchlist within this block
+                let filter = Filter::new()
+                    .from_block(block_num)
+                    .to_block(block_num)
+                    .address(active_watchlist.clone());
+
+                let logs = provider.get_logs(&filter).await?;
+                let log_count = logs.len();
+
+                for log in logs {
+                    storage::save_raw_log(&pool, chain_id, &log).await?;
+                }
+
+                // Summary log for the processed block if activity was found
+                if native_count > 0 || log_count > 0 {
+                    info!(
+                        block = block_num,
+                        eth_transfers = native_count,
+                        token_logs = log_count,
+                        "Activity detected and saved"
+                    );
+                }
+
+                // Update the tracker so we don't process this block again
+                last_processed = block_num;
+            }
+        } else {
+            error!(
+                chain_id,
+                "Failed to fetch latest block number from provider"
+            );
+        }
+
+        // Wait before polling for new blocks again
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
